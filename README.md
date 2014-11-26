@@ -12,6 +12,8 @@ pattern for [Laravel 4's](http://laravel.com/) Eloquent ORM.
 * [Installation](#installation)
 * [Getting started](#getting-started)
 * [Usage](#usage)
+* [Further information](#further-information)
+* [Contributing](#contributing)
 
 <a name="about"></a>
 ## About Nested Sets
@@ -215,9 +217,15 @@ to use Baum with your model. Below are some examples.
 * [Relations](#node-relations)
 * [Root and Leaf scopes](#node-basic-scopes)
 * [Accessing the ancestry/descendancy chain](#node-chains)
+* [Limiting levels of children returned](#limiting-depth)
+* [Custom sorting column](#custom-sorting-column)
 * [Dumping the hierarchy tree](#hierarchy-tree)
 * [Model events: `moving` and `moved`](#node-model-events)
 * [Scope support](#scope-support)
+* [Validation](#validation)
+* [Tree rebuilding](#rebuilding)
+* [Soft deletes](#soft-deletes)
+* [Seeding/Mass assignment](#seeding)
 * [Misc/Utility functions](#misc-utilities)
 
 <a name="creating-root-node"></a>
@@ -234,6 +242,14 @@ into a *root node*:
 
 ```php
 $node->makeRoot();
+```
+
+You may also nullify it's `parent_id` column to accomplish the same behaviour:
+
+```php
+// This works the same as makeRoot()
+$node->parent_id = null;
+$node->save();
 ```
 
 <a name="inserting-nodes"></a>
@@ -281,6 +297,8 @@ Baum provides several methods for moving nodes around:
 * `makeSiblingOf($otherNode)`: Alias for `makeNextSiblingOf`.
 * `makePreviousSiblingOf($otherNode)`: Alias for `moveToLeftOf`.
 * `makeChildOf($otherNode)`: Make the node a child of ...
+* `makeFirstChildOf($otherNode)`: Make the node the first child of ...
+* `makeLastChildOf($otherNode)`: Alias for `makeChildOf`.
 * `makeRoot()`: Make current node a root node.
 
 For example:
@@ -404,6 +422,47 @@ foreach($node->getDescendantsAndSelf() as $descendant) {
 }
 ```
 
+<a name="limiting-depth"></a>
+### Limiting the levels of children returned
+
+In some situations where the hierarchy depth is huge it might be desirable to limit the number of levels of children returned (depth). You can do this in Baum by using the `limitDepth` query scope.
+
+The following snippet will get the current node's descendants up to a maximum
+of 5 depth levels below it:
+
+```php
+$node->descendants()->limitDepth(5)->get();
+```
+
+Similarly, you can limit the descendancy levels with both the `getDescendants` and `getDescendantsAndSelf` methods by supplying the desired depth limit as the first argument:
+
+```php
+// This will work without depth limiting
+// 1. As usual
+$node->getDescendants();
+// 2. Selecting only some attributes
+$other->getDescendants(array('id', 'parent_id', 'name'));
+...
+// With depth limiting
+// 1. A maximum of 5 levels of children will be returned
+$node->getDescendants(5);
+// 2. A max. of 5 levels of children will be returned selecting only some attrs
+$other->getDescendants(5, array('id', 'parent_id', 'name'));
+```
+
+<a name="custom-sorting-column"></a>
+### Custom sorting column
+
+By default in Baum all results are returned sorted by the `lft` index column
+value for consistency.
+
+If you wish to change this default behaviour you need to specify in your model
+the name of the column you wish to use to sort your results like this:
+
+```php
+protected $orderColumn = 'name';
+```
+
 <a name="hierarchy-tree"></a>
 ### Dumping the hierarchy tree
 
@@ -415,7 +474,7 @@ Retrieving a complete tree hierarchy into a regular `Collection` object with
 its children *properly nested* is as simple as:
 
 ```php
-$tree = Category::where('name', '=', Books)->getDescendantsAndSelf()->toHierarchy();
+$tree = Category::where('name', '=', Books)->first()->getDescendantsAndSelf()->toHierarchy();
 ```
 
 <a name="node-model-events"></a>
@@ -488,6 +547,189 @@ $root2->children()->get(); // <- returns $child2
 All methods which ask or traverse the Nested Set tree will use the `scoped`
 attribute (if provided).
 
+**Please note** that, for now, moving nodes between scopes is not supported.
+
+<a name="validation"></a>
+### Validation
+
+The `::isValidNestedSet()` static method allows you to check if your underlying tree structure is correct. It mainly checks for these 3 things:
+
+* Check that the bound indexes `lft`, `rgt` are not null, `rgt` values greater
+than `lft` and within the bounds of the parent node (if set).
+* That there are no duplicates for the `lft` and `rgt` column values.
+* As the first check does not actually check root nodes, see if each root has
+the `lft` and `rgt` indexes within the bounds of its children.
+
+All of the checks are *scope aware* and will check each scope separately if needed.
+
+Example usage, given a `Category` node class:
+
+```php
+Category::isValidNestedSet()
+=> true
+```
+
+<a name="rebuilding"></a>
+### Tree rebuilding
+
+Baum supports for complete tree-structure rebuilding (or reindexing) via the
+`::rebuild()` static method.
+
+This method will re-index all your `lft`, `rgt` and `depth` column values,
+inspecting your tree only from the parent <-> children relation
+standpoint. Which means that you only need a correctly filled `parent_id` column
+and Baum will try its best to recompute the rest.
+
+This can prove quite useful when something has gone horribly wrong with the index
+values or it may come quite handy when *converting* from another implementation
+(which would probably have a `parent_id` column).
+
+This operation is also *scope aware* and will rebuild all of the scopes
+separately if they are defined.
+
+Simple example usage, given a `Category` node class:
+
+```php
+Category::rebuild()
+```
+
+Valid trees (per the `isValidNestedSet` method) will not get rebuilt. To force the index rebuilding process simply call the rebuild method with `true` as the first parameter:
+
+```php
+Category::rebuild(true);
+```
+
+<a name="soft-deletes"></a>
+### Soft deletes
+
+Baum comes with **limited support** for soft-delete operations. What I mean
+by *limited* is that the testing is still limited and the *soft delete*
+functionality is changing in the upcoming 4.2 version of the framework, so use
+this feature wisely.
+
+For now, you may consider a **safe** `restore()` operation to be one of:
+
+* Restoring a leaf node
+* Restoring a whole sub-tree in which the parent is not soft-deleted
+
+<a name="seeding"></a>
+### Seeding/Mass-assignment
+
+Because Nested Set structures usually involve a number of method calls to build a hierarchy structure (which result in several database queries), Baum provides two convenient methods which will map the supplied array of node attributes and create a hierarchy tree from them:
+
+* `buildTree($nodeList)`: (static method) Maps the supplied array of node attributes into the database.
+* `makeTree($nodeList)`: (instance method) Maps the supplied array of node attributes into the database using the current node instance as the parent for the provided subtree.
+
+Both methods will *create* new nodes when the primary key is not supplied, *update* or *create* if it is, and *delete* all nodes which are not present in the *affecting scope*. Understand that the *affecting scope* for the `buildTree` static method is the whole nested set tree and for the `makeTree` instance method are all of the current node's descendants.
+
+For example, imagine we wanted to map the following category hierarchy into our database:
+
+- TV & Home Theater
+- Tablets & E-Readers
+- Computers
+  + Laptops
+    * PC Laptops
+    * Macbooks (Air/Pro)
+  + Desktops
+  + Monitors
+- Cell Phones
+
+This could be easily accomplished with the following code:
+
+```php
+$categories = [
+  ['id' => 1, 'name' => 'TV & Home Theather'],
+  ['id' => 2, 'name' => 'Tablets & E-Readers'],
+  ['id' => 3, 'name' => 'Computers', 'children' => [
+    ['id' => 4, 'name' => 'Laptops', 'children' => [
+      ['id' => 5, 'name' => 'PC Laptops'],
+      ['id' => 6, 'name' => 'Macbooks (Air/Pro)']
+    ]],
+    ['id' => 7, 'name' => 'Desktops'],
+    ['id' => 8, 'name' => 'Monitors']
+  ]],
+  ['id' => 9, 'name' => 'Cell Phones']
+];
+
+Category::buildTree($categories) // => true
+```
+
+After that, we may just update the hierarchy as needed:
+
+```php
+$categories = [
+  ['id' => 1, 'name' => 'TV & Home Theather'],
+  ['id' => 2, 'name' => 'Tablets & E-Readers'],
+  ['id' => 3, 'name' => 'Computers', 'children' => [
+    ['id' => 4, 'name' => 'Laptops', 'children' => [
+      ['id' => 5, 'name' => 'PC Laptops'],
+      ['id' => 6, 'name' => 'Macbooks (Air/Pro)']
+    ]],
+    ['id' => 7, 'name' => 'Desktops', 'children' => [
+      // These will be created
+      ['name' => 'Towers Only'],
+      ['name' => 'Desktop Packages'],
+      ['name' => 'All-in-One Computers'],
+      ['name' => 'Gaming Desktops']
+    ]]
+    // This one, as it's not present, will be deleted
+    // ['id' => 8, 'name' => 'Monitors'],
+  ]],
+  ['id' => 9, 'name' => 'Cell Phones']
+];
+
+Category::buildTree($categories); // => true
+```
+
+The `makeTree` instance method works in a similar fashion. The only difference
+is that it will only perform operations on the *descendants* of the calling node instance.
+
+So now imagine we already have the following hierarchy in the database:
+
+- Electronics
+- Health Fitness & Beaty
+- Small Appliances
+- Major Appliances
+
+If we execute the following code:
+
+```php
+$children = [
+  ['name' => 'TV & Home Theather'],
+  ['name' => 'Tablets & E-Readers'],
+  ['name' => 'Computers', 'children' => [
+    ['name' => 'Laptops', 'children' => [
+      ['name' => 'PC Laptops'],
+      ['name' => 'Macbooks (Air/Pro)']
+    ]],
+    ['name' => 'Desktops'],
+    ['name' => 'Monitors']
+  ]],
+  ['name' => 'Cell Phones']
+];
+
+$electronics = Category::where('name', '=', 'Electronics')->first();
+$electronics->makeTree($children); // => true
+```
+
+Would result in:
+
+- Electronics
+  + TV & Home Theater
+  + Tablets & E-Readers
+  + Computers
+    * Laptops
+      - PC Laptops
+      - Macbooks (Air/Pro)
+    * Desktops
+    * Monitors
+  + Cell Phones
+- Health Fitness & Beaty
+- Small Appliances
+- Major Appliances
+
+Updating and deleting nodes from the subtree works the same way.
+
 <a name="misc-utilities"></a>
 ### Misc/Utility functions
 
@@ -508,15 +750,55 @@ var_dump($root->descendantsAndSelf()->withoutNode($node)->get());
 ... // <- This result set will not contain $node
 ```
 
+#### Get a nested list of column values
+
+The `::getNestedList()` static method returns a key-value pair array indicating
+a node's depth. Useful for silling `select` elements, etc.
+
+It expects the column name to return, and optionally: the column
+to use for array keys (will use `id` if none supplied) and/or a separator:
+
+```php
+public static function getNestedList($column, $key = null, $seperator = ' ');
+```
+
+An example use case:
+
+```php
+$nestedList = Category::getNestedList('name');
+// $nestedList will contain an array like the following:
+// array(
+//   1 => 'Root 1',
+//   2 => ' Child 1',
+//   3 => ' Child 2',
+//   4 => '  Child 2.1',
+//   5 => ' Child 3',
+//   6 => 'Root 2'
+// );
+```
+
+<a name="further-information"></a>
+## Further information
+
+You may find additional information, usage examples and/or frequently
+asked questions about Baum in the [wiki](https://github.com/etrepat/baum/wiki).
+
+Feel free to browse the wiki after finishing this README:
+
+[https://github.com/etrepat/baum/wiki](https://github.com/etrepat/baum/wiki)
+
+<a name="contributing"></a>
 ## Contributing
 
 Thinking of contributing? Maybe you've found some nasty bug? That's great news!
 
-1. Fork the project:.
-2. Create your bugfix/feature branch.
-3. Code away your changes and, if you can, provide some tests.
-4. Commit your changes & push to the branch.
-5. Create a new Pull Request
+1. Fork & clone the project: `git clone git@github.com:your-username/baum.git`.
+2. Run the tests and make sure that they pass with your setup: `phpunit`.
+3. Create your bugfix/feature branch and code away your changes. Add tests for your changes.
+4. Make sure all the tests still pass: `phpunit`.
+5. Push to your fork and submit new a pull request.
+
+Please see the [CONTRIBUTING.md](https://github.com/etrepat/baum/blob/master/CONTRIBUTING.md) file for extended guidelines and/or recommendations.
 
 ## License
 
